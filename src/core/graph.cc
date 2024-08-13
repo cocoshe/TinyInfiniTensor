@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <numeric>
 #include <queue>
+#include "operators/transpose.h"
+#include "operators/matmul.h"
 
 namespace infini
 {
@@ -106,6 +108,79 @@ namespace infini
         // 1. 去除冗余的算子（例如，两个相邻的算子都是 transpose 算子，且做的是相反的操作，可以将其全部删除）
         // 2. 合并算子（例如，矩阵乘算子中含有属性transA、transB，如果其输入存在transpose，且对最后两个维度做交换，就可以将transpose融入到矩阵乘算子的属性中去）
         // =================================== 作业 ===================================
+        if (ops.empty()) return;
+        for (size_t i = 0; i < ops.size(); i ++) {
+            auto& op = ops[i];
+            if (op->getOpType() == OpType::Transpose) {
+                for (auto& next_op: op->getSuccessors()) {
+                    if (next_op->getOpType() == OpType::Transpose) {
+                        auto&& perm1 = std::dynamic_pointer_cast<TransposeObj>(op)->getPermute();
+                        auto&& perm2 = std::dynamic_pointer_cast<TransposeObj>(next_op)->getPermute();
+                        if (perm1 != perm2) continue;
+                        i = -1;
+                        auto& op_in = op->getInputs()[0];
+                        auto& op_out = op->getOutputs()[0];
+                        auto& next_op_in = next_op->getInputs()[0];
+                        auto& next_op_out = next_op->getOutputs()[0];
+
+                        op_in->removeTarget(op);
+                        for (auto& next_next_op: next_op->getSuccessors()) {
+                            op_in->addTarget(next_next_op);
+                            next_next_op->removePredecessors(next_op);
+                            next_next_op->replaceInput(next_op_out, op_in);
+                            for (auto& pre_op: op->getPredecessors()) {
+                                // pre_op --> op(transpose) --> next_op(transpose) --> next_next_op
+                                pre_op->removeSuccessors(op);
+                                pre_op->addSuccessors(next_next_op);
+                                next_next_op->addPredecessors(pre_op);
+                            }
+                        }
+                        removeTensor(op_out), removeTensor(next_op_out);
+                        removeOperator(op), removeOperator(next_op);
+                    } 
+                }
+            } else if (op->getOpType() == OpType::MatMul) {
+                // transpose_op1 ------↓
+                //                  matmul_op
+                // transpose_op2 ------↑
+                auto&& matmul_op = std::dynamic_pointer_cast<MatmulObj>(op);
+                auto& matmul_ins = matmul_op->getInputs();       
+                bool is_optimized = false;         
+                for (int i = 0; i < 2; i ++ ) {
+                    auto& matmul_in = matmul_ins[i];
+                    auto&& trans_op = matmul_in->getSource();
+                    if (trans_op && trans_op->getOpType() == OpType::Transpose) {
+                        auto& trans_in = trans_op->getInputs()[0];
+                        auto& trans_out = trans_op->getOutputs()[0];
+                        // check perm
+                        auto&& perm = std::dynamic_pointer_cast<TransposeObj>(trans_op)->getPermute();
+                        int n_perm = perm.size();
+                        bool flag = true;
+                        for (int i = 0; i < n_perm-2; i ++ ) {
+                            if (perm[i] == i) continue;
+                            flag = false;
+                            break;
+                        }
+                        if (!(perm[n_perm-1] == n_perm-2 && perm[n_perm-2] == n_perm-1)) flag = false;
+                        if (flag) {
+                            if (i == 0) matmul_op->setTransA(true);
+                            else matmul_op->setTransB(true);
+                            trans_in->removeTarget(trans_op);
+                            trans_in->addTarget(matmul_op);
+                            matmul_op->removePredecessors(trans_op);
+                            matmul_op->replaceInput(trans_out, trans_in);
+                            removeTensor(trans_out);
+                            removeOperator(trans_op);
+                            is_optimized = true;
+                        }
+                    }
+                }
+                if (is_optimized) {
+                    i = -1;
+                }
+            }
+ 
+        }
     }
 
     Tensor GraphObj::getTensor(int fuid) const
@@ -151,8 +226,23 @@ namespace infini
         // =================================== 作业 ===================================
         // TODO：利用 allocator 给计算图分配内存
         // HINT: 获取分配好的内存指针后，可以调用 tensor 的 setDataBlob 函数给 tensor 绑定内存
-        // =================================== 作业 ===================================
+        
+        // Use two for loops instead of one, 
+        // because `IT_ASSERT(this->ptr == nullptr);` in `Allocator::alloc`,
+        // the physical mem shouldn't be allocated when `Allocator::alloc`.
+        unordered_map<Tensor, size_t> mp;
+        for (auto& tensor: tensors) {
+            size_t sz = tensor->getBytes();
+            size_t offset = allocator.alloc(sz);
+            mp[tensor] = offset;
+        }
 
+        auto&& base = allocator.getPtr();
+        for (auto& tensor: tensors) {
+            auto&& b = make_ref<BlobObj>(runtime, base + mp[tensor]);
+            tensor->setDataBlob(b);
+        }
+        
         allocator.info();
     }
 

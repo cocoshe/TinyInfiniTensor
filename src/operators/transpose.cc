@@ -28,13 +28,10 @@ namespace infini
         auto input_dim = A->getDims();
         auto output_dim = input_dim;
         int rank = A->getRank();
-
-        // =================================== 作业 ===================================
-        // TODO：修改 output_dim，返回正确的 transpose 后的 shape
-        // REF: https://onnx.ai/onnx/operators/onnx__Transpose.html#transpose-21
-        // =================================== 作业 ===================================
-
-        return std::nullopt;
+        for (size_t i = 0; i < transposePermute.size(); i ++ ) {
+            output_dim[i] = input_dim[transposePermute[i]];
+        }
+        return vector<Shape>{output_dim};
     }
 
     std::string TransposeObj::toString() const
